@@ -1,0 +1,576 @@
+Palavras e gêneros dos best sellers, por Luiz Guilherme
+========================================================
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, packages}
+# Carrega os pacotes usados pelo projeto:
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(qdap)
+library(gridExtra)
+library(data.table)
+library(corrplot)
+```
+
+Este relatório busca identificar quais gêneros em geral são mais e melhor avaliados pelos leitores, bem como entender, a partir dos resumos dos livros, as palavras - e consequentemente temas - que causam maior interesse.
+
+
+Carregamento dos dados
+-----------------------
+
+Foram utilizadas duas bases em conjunto, ambas disponíveis inicialmente no portal Kaggle.com:
+
+- booksumaries.csv: contém resumos e dados básicos de 16.559 livros, extraídos da Wikipedia e disponibilizados na plataforma em abril/2018. Possui 7 colunas:
+```{r echo=FALSE, Load_the_Data_book_summaries}
+# Le o arquivo booksummaries, extraido de 
+# https://www.kaggle.com/ymaricar/cmu-book-summary-dataset/home
+# (que foi preparado externamente para exclusao de aspas duplas
+# e caracteres especiais identificados),
+# ignorando o cabecalho:
+book_summaries <- read.csv('booksummaries.csv', sep = '\t', header = FALSE)
+dim(book_summaries)
+```
+
+- books.csv: contém avaliações e dados básicos de 10.000 livros. Possui 23 colunas:
+```{r echo=FALSE, Load_the_Data_books}
+# Le o segundo arquivo, cuja versao obsoleta disponível em
+# https://www.kaggle.com/zygmunt/goodbooks-10k/downloads/books.csv/5
+# foi substituida pela versao disponivel em
+# https://github.com/zygmuntz/goodbooks-10k.
+# Esta base contem a avaliacao de cada livro
+books_rating <- read.csv('books.csv')
+dim(books_rating)
+```
+
+
+Inicialmente foi feita a preparação dos dados da primeira base, transformando principalmente a coluna de gêneros, que continha todos os gêneros por livro divididos por vírgulas e foi dividida em quatro novas.
+
+```{r echo=FALSE, Transform_the_Data_book_summaries}
+# Adiciona o cabecalho:
+names(book_summaries) <- c('wikipedia_id', 'freebase_id', 'book_title',
+                           'book_author', 'publication_date', 'genres',
+                           'summary')
+
+# Define o regex e exclui onde encontrado na coluna de generos:
+pattern <- "(\\W\\/m\\/\\w+\\:\\s)|(\\})"
+book_summaries$genres <- gsub(pattern, "", book_summaries$genres)
+
+# Divide os generos por virgula, ao mesmo tempo em que cria colunas
+# para os quatro primeiros generos de cada livro:
+book_summaries <- separate(book_summaries, 'genres',
+                           paste("genre", 1:4, sep="_"),
+                           sep=",", extra="drop",fill="right",
+                           remove = FALSE)
+
+book_summaries <- book_summaries[book_summaries$genre_1 != "", ]
+dim(book_summaries)
+str(book_summaries)
+```
+
+Neste ponto, após as transformações, a dataframe book_summaries passou a conter 12.841 observações e 11 variáveis, conforme exibido acima.
+
+Em seguida, as colunas título do livro e autor do livro foram tratadas para possibilitar join posterior:
+
+```{r echo=FALSE, Transform_Data_book_summaries}
+# Formata as colunas com titulo e autor, para possibilitar posterior join:
+book_summaries$book_title_formatted <- tolower(
+  gsub("\\W+", " ", gsub("\\W", " ", book_summaries$book_title)))
+book_summaries$book_author_formatted <- tolower(
+  gsub("\\W+", " ", gsub("\\W", " ", book_summaries$book_author)))
+
+book_summaries$summary_part <- substr(book_summaries$summary, 1, 30)
+head(book_summaries[, -which(names(book_summaries) %in% c("summary"))])
+```
+
+A segunda base foi então preparada, esta com os dados de avaliações por livro. Esta base sofreu basicamente as mesmas transformações que a primeira:
+
+```{r echo=FALSE, Transform_the_Data_books}
+# Formata as colunas com titulo e autor da segunda base,
+# para possibilitar posterior join:
+books_rating$book_title_formatted <- tolower(
+  gsub("\\W+", " ", gsub("\\W", " ", books_rating$original_title)))
+books_rating$book_author_formatted <- tolower(
+  gsub("\\W+", " ", gsub("\\W", " ", books_rating$authors)))
+
+head(books_rating)
+```
+
+Foi feito o join entre os dois dataframes tratados, excluindo-se as colunas desnecessárias, de forma a obter um resultante com 1943 observações e 20 variáveis:
+
+```{r echo=FALSE, Join_Data}
+# Une os dois dataframes:
+books <- inner_join(book_summaries, books_rating,
+                    c("book_title_formatted" = "book_title_formatted",
+                      "book_author_formatted" = "book_author_formatted"))
+
+# Exclui dataframes que nao serao mais utilizados:
+rm(book_summaries, books_rating)
+
+# Mantem apenas as colunas interessantes para a analise:
+cols <- c('book_title', 'book_author', 'original_publication_year',
+          'language_code', 'genres', 'genre_1', 'genre_2', 'genre_3',
+          'genre_4', 'summary', 'summary_part', 'average_rating',
+          'ratings_count', 'work_ratings_count', 'work_text_reviews_count',
+          'ratings_1', 'ratings_2', 'ratings_3', 'ratings_4', 'ratings_5')
+books <- books[cols]
+
+dim(books)
+head(books[, -which(names(books) %in% c("summary"))])
+```
+
+Acrescentou-se três novas colunas, todas a partir do gênero principal:
+
+- genre_1_median_rating: mediana das avaliações médias;
+
+- genre_1_mean_ratings_count: média das quantidades de avaliações observadas;
+
+- genre_1_freq: frequência do genero na base.
+
+```{r echo=FALSE, Group_and_Summarise}
+# Cria tres novas variaveis a partir do genero principal de cada livro,
+# uma com a mediana das avaliacoes medias, outra com a media das quantidades
+# de avaliacoes e uma ultima com a frequencia de cada genero na base:
+books <- books %>%
+  group_by(genre_1) %>%
+  mutate(genre_1_median_rating = median(average_rating),
+         genre_1_mean_ratings_count = mean(work_ratings_count),
+         genre_1_freq = n()) %>%
+  ungroup(genre_1)
+```
+
+Também criou-se uma lista ordenada decrescentemente por genre_1_mean_ratings_count, com todos os gêneros únicos. Observa-se que há 88 gêneros distintos na dataframe books:
+
+```{r echo=FALSE, Get_Genres}
+# Extrai os generos unicos, para a base restante:
+genres <- distinct(books, genre_1, genre_1_median_rating,
+                   genre_1_mean_ratings_count, genre_1_freq)
+genres <- genres[with(genres, order(-genre_1_mean_ratings_count)), ]
+
+dim(genres)
+head(genres)
+```
+
+
+# Seção de Gráficos Univariados e Análise Univariada
+
+### Qual é a estrutura do conjunto de dados?
+
+```{r echo=FALSE, dim_str_summary_books}
+dim(books)
+str(books[, -which(names(books) %in% c("summary"))])
+summary(books[, -which(names(books) %in% c("summary"))])
+```
+
+
+O dataset possui 23 variáveis, com um total de 1.943 observações. Conforme summary exibido acima e gráfico abaixo, os livros da base foram publicados entre 1813 e 2012, em quantidades crescentes ano a ano:
+
+```{r echo=FALSE, Univariate_Plots_1}
+qplot(original_publication_year, data = books, bins = 100)
+```
+
+Observa-se que os títulos disponíveis na base concentram-se em livros de língua inglesa, abrangindo Canadá, Reino Unido e Estados Unidos. Há ainda 172 títulos cuja língua não foi especificada.
+
+```{r echo=FALSE, Univariate_Plots_2}
+qplot(language_code, data = books[books$language_code != "", ])
+```
+
+A maioria dos livros foram em média bem avaliados, com nota aproximada de 4 em uma escala que vai de 1 a 5:
+
+```{r echo=FALSE, Univariate_Plots_3}
+qplot(average_rating, data = books, bins = 10)
+```
+
+Não foi encontrada descrição sobre a diferença entre ratings_count e work_ratings_count, mas os gráficos abaixo indicam similaridade.
+O último gráfico, que é baseado na razão entre ratings_count e work_ratings_count confirma isto, com a maior parte dos livros tendo ratings_count pelo menos 80% do valor de work_ratings_count:
+
+```{r echo=FALSE, warning=FALSE, Univariate_Plots_4}
+# Assimila cada grafico a uma variavel:
+p1 <- qplot(ratings_count, data = books, bins = 100) +
+  scale_x_continuous(labels = scales::comma, limits = c(0, 100000))
+p2 <- qplot(work_ratings_count, data = books, bins = 100) +
+  scale_x_continuous(labels = scales::comma, limits = c(0, 100000))
+p3 <- qplot(ratings_count/work_ratings_count, data = books, bins = 100)
+
+# Exibe os graficos em um grid com uma coluna:
+grid.arrange(p1, p2, p3, ncol = 1)
+rm(p1, p2, p3)
+```
+
+Por fim, com relação à quantidade de reviews, observa-se que poucos livros superaram 2000 reviews:
+
+```{r echo=FALSE, warning=FALSE, Univariate_Plots_5}
+# Assimila cada grafico a uma variavel:
+p1 <- qplot(work_text_reviews_count, data = books, bins = 500) +
+  scale_x_continuous(limits = c(0, 50000))
+p2 <- qplot(work_text_reviews_count, data = books, bins = 500) +
+  scale_x_continuous(limits = c(0, 5000))
+p3 <- qplot(log10(work_text_reviews_count), data = books, bins = 500)
+
+# Exibe os graficos em um grid com uma coluna:
+grid.arrange(p1, p2, p3, ncol = 1)
+rm(p1, p2, p3)
+```
+
+### Quais são os principais atributos de interesse deste conjunto de dados?
+
+Entendo que os atributos mais interessantes para o objetivo do relatório são:
+
+- o gênero principal;
+
+- o resumo de cada livro (summary).
+
+
+### Quais outros atributos você acha que podem lhe auxiliar na investigação destes atributos de interesse?
+
+Aliado aos atributos citados acima, a média das avaliações (average_rating) e as quantidades de avaliações (work_ratings_count) e de reviews (work_text_reviews_count) se mostram interessantes como controle, evitando que um gênero sobreponha outros simplesmente por a base conter mais livros dele.
+
+
+### Você criou novas variáveis a partir dos atributos existentes no conjunto de dados?
+
+Sim, foram criadas a partir dos atributos de avaliações em conjunto com o gênero principal: genre_1_median_rating, genre_1_mean_ratings_count e genre_1_freq.
+
+
+### Dos atributos investigados, distribuições incomuns foram encontradas? Você aplicou operações nos dados para limpá-los, ajustá-los ou mudar a forma dos dados? Se sim, por quê?
+
+Não foram encontradas distribuições inesperadas, ainda que tenham sido aplicadas operações para melhor visualizar alguns casos.
+
+
+# Seção de Gráficos Bivariados
+
+Considerando apenas livros cuja quantidade de avaliações fosse superior a 79.414 (terceiro quartil), o gráfico abaixo apresenta a média da quantidade de avaliacoes por gênero:
+
+```{r echo=FALSE, Bivariate_Plots_2, fig.width=8}
+summary(books$work_ratings_count)
+
+# Exclui livros cuja quantidade de avaliacoes for inferior aa quantidade
+# correspondente ao terceiro quartil:
+books_most_rated <- books[books$work_ratings_count >
+                            quantile(books$work_ratings_count, 0.75), ]
+
+# Exibe grafico da media da quantidade de avaliacoes por genero, e em seguida
+# aproxima a visualização:
+ggplot(aes(genre_1, genre_1_mean_ratings_count),
+             data = books_most_rated) +
+  geom_point() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_y_continuous(labels = scales::comma)
+```
+
+Pelo gráfico acima, é possível ver que alguns gêneros destacam-se.
+Fazendo um novo corte, para melhorar a visualização, desta vez pela mediana de genre_1_mean_ratings_count, temos:
+
+```{r echo=FALSE, Bivariate_Plots_2_zoom, fig.width=8}
+highest_mean_ratings_count <- books_most_rated[
+        books_most_rated$genre_1_mean_ratings_count >
+          quantile(books_most_rated$genre_1_mean_ratings_count, 0.5), ]
+
+ggplot(aes(genre_1, genre_1_mean_ratings_count),
+             data = highest_mean_ratings_count) +
+  geom_point() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_y_continuous(labels = scales::comma)
+```
+
+Acima percebe-se que entre os livros com maior quantidade de avaliações têm destaque os gêneros Narrativa em Primeira Pessoa e Ficção com Vampiros, seguidos pelos gêneros Anti-guerra, Biografia, Conspiração, História com Fantasmas e Histórias em Mar.
+
+Abaixo foram criadas 3 visões comparativas entre gêneros principais e secundários, buscando entender suas relações. Vale observar especialmente os temas Ficção Científica e Fantasia, que possuem muitas relações:
+
+```{r echo=FALSE, Bivariate_Plots_3, fig.height=7}
+# Exibe os graficos com as comparacoes de generos principais com secundarios:
+qplot(x = genre_1, y = genre_2,
+      data = subset(highest_mean_ratings_count, !is.na(genre_2))) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+qplot(x = genre_1, y = genre_3,
+      data = subset(highest_mean_ratings_count, !is.na(genre_3))) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+qplot(x = genre_1, y = genre_4,
+      data = subset(highest_mean_ratings_count, !is.na(genre_4))) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+
+O gráfico tipo boxplot abaixo permite ver a relação entre gênero e média de avaliações, ainda considerando os cortes supracitados. Percebe-se que os gêneros Ficção Científica e Fantasia estão entre os que possuem avaliações abaixo de 3,6, ao lado do gênero Biografia:
+
+```{r echo=FALSE, Bivariate_Plots_4, fig.width=10}
+# Exibe boxplot:
+ggplot(aes(y = average_rating, x = genre_1, group = genre_1),
+  data = highest_mean_ratings_count) +
+  geom_boxplot(outlier.colour = "red") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+# Exibe as estatisticas de average_rating agrupadas por genero:
+tapply(highest_mean_ratings_count$average_rating,
+       highest_mean_ratings_count$genre_1,
+       summary)
+```
+
+
+A título de curiosidade, foi verificada a relação entre o tamanho do título com a mediana das avaliações médias recebidas, sem grandes surpresas:
+
+```{r echo=FALSE, Bivariate_Plots_5}
+# Exibe as comparacoes de generos principais com secundarios:
+highest_mean_ratings_count$book_title_length <-
+  sapply(highest_mean_ratings_count$book_title,
+         function(x) length(unlist(strsplit(as.character(x), "\\W+"))))
+qplot(x = book_title_length, y = genre_1_median_rating,
+      data = highest_mean_ratings_count)
+```
+
+Abaixo seguem as correlações entre atributos:
+
+```{r echo=FALSE, Bivariate_Plots_Correlation}
+# Exibe as correlacoes:
+correlations <- cor(select_if(highest_mean_ratings_count, is.numeric),
+                    method = "pearson")
+print(correlations)
+corrplot(correlations)
+
+rm(correlations)
+```
+
+Percebe-se, portanto, correlação positiva principalmente entre a quantidade de avaliações, de reviews e de maiores notas (entre 4 e 5).
+Isto pode ser explicado pois, conforme visto anteriormente, a maioria dos livros da base possui avaliação próxima a 4.
+
+# Análise Bivariada
+
+### Discuta sobre alguns dos relacionamentos observados nesta parte da investigação. Como os atributos de interesse variaram no conjunto de dados?
+
+Observa-se que os livros mais avaliados (provavelmente também os mais lidos pelos usuários contemplados na base) são de gêneros relacionados a guerras, biografias, personagens fantásticos (como fantasmas e vampiros) e viagens no tempo, em sua maioria narradas em primeira pessoa.
+
+Interessante também notar a relação entre gêneros principais e secundários, especialmente o gênero de Ficção com Vampiros, cujos gêneros relacionados foram Terror, Romance, Literatura jovem e Best Seller do New York Times.
+
+
+### Você observou algum relacionamento interessante entre os outros atributos (os que não são de interesse)?
+
+Sim, notou-se correlação positiva entre work_ratings_count e work_text_reviews_count, de 0.8848033726, o que era esperado, já que quanto mais avaliado um livro é, maior as chances de possuir mais reviews.
+Já com relação ao tamanho dos títulos (a minha curiosidade), praticamente não há correlação entre o tamanho dos títulos e a preferência dos leitores, já que todas as correlações com book_title_length foram próximas de zero. A com genre_1_median_rating, especificamente, foi de -0.08678059.
+
+
+### Qual foi o relacionamento mais forte encontrado?
+
+O esperado: ratings_count com work_ratings_count, com correlação de 0.99424032.
+
+
+# Seção de Gráficos Multivariados
+
+Partindo para o objetivo, que busca a relação de livros best sellers com gêneros e palavras contidas no resumo dos livros, foi criado novo dataframe contendo as 20 palavras mais comuns em cada gênero:
+
+```{r echo=FALSE, warning=FALSE, Multivariate_Plots_Table}
+# Formata coluna de resumo:
+books$summary_formatted <-
+  vapply(strsplit((gsub("[[:punct:][:blank:]]+", " ",
+                        (tolower(books$summary)))), " "),
+         function(x) paste(unique(x), collapse = " "), character(1L))
+
+# Lista stopwords identificadas, para excluí-las do resultado:
+identified_stopwords <- c("will", "also", "however", "first", "person",
+                          "narrative", "story", "book", "tells", "novel",
+                          "take", "eventually", "become", "named", "finds",
+                          "another", "later")
+
+# Captura palavras mais frequentes, por genero:
+top_words <- data.frame(matrix(ncol = 4, nrow = 0))
+colnames(top_words) <- c("GENRE", "WORD", "FREQ", "GENRE_FREQ")
+for (i in 1:length(genres$genre_1)) {
+  top_words_genre <- freq_terms(
+    books[books$genre_1 == as.character(genres$genre_1[i]), ]$summary_formatted,
+    at.least = 4, stopwords = c(tm::stopwords("en"), identified_stopwords),
+    top = 20, extend = FALSE)
+  aux_top_words_genre <- data.frame(GENRE = as.character(genres$genre_1[i]),
+                                    WORD = top_words_genre['WORD'],
+                                    FREQ = top_words_genre['FREQ'],
+                                    GENRE_FREQ = genres$genre_1_freq[i])
+  top_words <- bind_rows(top_words, aux_top_words_genre)
+}
+```
+
+Também capturou-se as palavras mais frequentes para os livros com maior número de avaliações, os prováveis best-sellers:
+
+```{r echo=FALSE, Multivariate_Plots_Table_2}
+# Formata coluna de resumo:
+books_most_rated$summary_formatted <-
+  vapply(strsplit((gsub("[[:punct:][:blank:]]+", " ",
+                        (tolower(books_most_rated$summary)))), " "),
+         function(x) paste(unique(x), collapse = " "), character(1L))
+
+# Captura palavras mais frequentes para os livros mais avaliados (prováveis
+# best-sellers):
+top_words_most_rated <- freq_terms(books_most_rated$summary_formatted,
+                                   at.least = 4,
+                                   stopwords = c(tm::stopwords("en"),
+                                                 identified_stopwords),
+                                   top = 20,
+                                   extend = FALSE)
+```
+
+A ideia aqui era, dadas as palavras mais frequentes por gênero, cruzá-las com as palavras mais frequentes dos livros mais avaliados, independente do gênero a que estes se referem, para obter a relação entre os dois:
+
+```{r echo=FALSE, Multivariate_Plots, fig.width=10}
+# Une os dois dataframes:
+books_most_rated_top_words <- data.frame(matrix(ncol = 5, nrow = 0))
+books_most_rated_top_words <- merge(top_words, top_words_most_rated,
+                                    by.x = 2, by.y = "WORD")
+
+# Filtra colunas:
+books_most_rated_top_words <- books_most_rated_top_words[,
+  which(names(books_most_rated_top_words) %in%
+          c("GENRE", "WORD", "FREQ.x", "GENRE_FREQ", "FREQ.y"))]
+
+# Reordena colunas:
+books_most_rated_top_words <- select(books_most_rated_top_words,
+                                     GENRE, everything())
+
+# Renomeia colunas:
+colnames(books_most_rated_top_words) <-
+  c("GENRE", "WORD", "FREQ", "GENRE_FREQ", "GENERAL_FREQ")   
+
+# Exibe o grafico:
+ggplot(aes(y = reorder(WORD, -GENERAL_FREQ), x = reorder(GENRE, -GENRE_FREQ),
+           fill = FREQ/GENRE_FREQ),
+  data = books_most_rated_top_words) +
+  geom_tile() +
+  scale_color_brewer(palette = "Blues") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+O gráfico acima contém:
+
+- No eixo y, os temas mais comuns dos livros com maior número de avaliações, ordenados pelo número de vezes em que o tema aparece (quanto mais próximo da origem, maior sua ocorrência);
+
+- No eixo x, em ordem decrescente de frequência na base, os gêneros;
+
+- Nas cores, a razão da frequência observada para a palavra no gênero em relação à frequência do gênero na base.
+
+# Análise Multivariada
+
+### Discuta sobre os relacionamentos observados nesta parte da investigação. Quais atributos que fortaleceram os demais na observação das variáveis de interesse?
+
+O cruzamento por si só, dos temas mais frequentes nos livros mais avaliados e dos gêneros com suas respectivas palavras mais frequentes, não estava muito elucidativo.
+
+Utilizar a frequência das palavras no gênero (FREQ), a frequência das palavras no geral (GENERAL_FREQ) e a frequência do gênero na base (GENRE_FREQ) contribuíram na observação, permitindo identificar mais facilmente o objetivo deste relatório.
+
+
+### Interações surpreendentes e/ou interessantes foram encontradas entre os atributos?
+
+Sim, especialmente a proximidade entre os doze primeiros gêneros, de forma que, em todos eles, até 70% dos livros contêm os três principais temas: vida, tempo, retorno.
+
+Interessante notar também a vigésima palavra: três, um número, muito frequente em diversas histórias infantis e na Bíblia.
+
+
+------
+
+# Gráficos Finais e Sumário
+
+### Primeiro Gráfico
+```{r echo=FALSE, Plot_One, fig.height=8}
+books_most_rated_main_genres <- merge(books,
+                                      highest_mean_ratings_count["genre_1"],
+                                      by.x = "genre_1",
+                                      by.y = "genre_1")
+
+ggplot(aes(y = genre_1, x = original_publication_year, fill = average_rating),
+  data = subset(books_most_rated_main_genres,
+                original_publication_year > 1950)) +
+  geom_tile() +
+  labs(x = "Ano de publicação", y = "Gênero", fill = "Avaliação média") +
+  scale_color_brewer(palette = "Blues") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  ggtitle("Distribuição dos Gêneros por Ano de Publicação e Avaliação média")
+```
+
+### Descrição do Primeiro Gráfico
+
+O gráfico acima permite de uma só vez entender como os gêneros de livros mais avaliados (a partir do terceiro quartil) se distribuem em relação aos anos de publicação e às médias de avaliação.
+
+É possível verificar que os gêneros Ficção científica mantem-se forte desde a década de 50. Ao mesmo tempo, livros de Fantasia passaram a ganhar mais atenção a partir da década de 80.
+
+
+### Segundo Gráfico
+```{r echo=FALSE, Plot_Two}
+# Efetua contagem por autor para executar novo filtro:
+count_authors <- count(books_most_rated, book_author, sort = TRUE)
+books_most_rated_main_authors <- merge(books_most_rated, count_authors,
+                                       by.x = "book_author",
+                                       by.y = "book_author")
+
+# summary(books_most_rated_main_authors$n)
+
+books_most_rated_main_authors <-
+  books_most_rated_main_authors[books_most_rated_main_authors$n >= 
+                  quantile(books_most_rated_main_authors$n, 0.75), ]
+
+ggplot(aes(y = genre_1, x = book_author, fill = average_rating),
+  data = books_most_rated_main_authors) +
+  geom_tile() +
+  labs(x = "Author", y = "Gênero", fill = "Avaliação média") +
+  scale_color_brewer(palette = "Blues") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  ggtitle("Autores com mais livros avaliados, seus gêneros e avaliações médias")
+```
+
+### Descrição do Segundo Gráfico
+
+Este gráfico mostra, para os autores com mais de 9 livros entre os mais avaliados, qual o gênero e média de avaliações de seus livros.
+
+Stephen King e seus mistérios acabam ficando em destaque nesta visualização. Quanto aos gêneros, Ficção, Mistério e Fantasia são os mais abordados.
+
+
+### Terceiro Gráfico
+```{r echo=FALSE, Plot_Three}
+# Exibe estatisticas relacionadas:
+# summary(top_words$FREQ)
+# summary(top_words$GENRE_FREQ)
+
+# Efetua merge das palavras com os livros mais avaliados:
+books_most_rated_average <-
+  merge(books_most_rated[,
+          which(names(books_most_rated) %in%
+                   c("genre_1",
+                     "average_rating",
+                     "genre_1_median_rating",
+                     "genre_1_mean_ratings_count"))],
+        top_words[top_words$FREQ > quantile(top_words$FREQ, 0.96) &
+                    top_words$GENRE_FREQ > median(top_words$GENRE_FREQ),],
+        by.x = "genre_1", by.y = "GENRE")
+
+# Exibe o gráfico
+ggplot(aes(y = genre_1, x = WORD),
+  data = books_most_rated_average) +
+  geom_point() +
+  labs(x = "Tema", y = "Gênero") +
+  scale_color_brewer(palette = "Blues") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  ggtitle("Temas mais comuns nos gêneros mais avaliados")
+```
+
+### Descrição do Terceiro Gráfico
+
+O gráfico acima considera, para os livros mais avaliados, os temas mais comuns.
+Para melhor visualização, foram extraídos somente alguns dos gêneros e palavras, baseado nas suas frequências.
+
+Observa-se que:
+
+- Os gêneros mais quantativamente avaliados envolvem ficção, literatura infantil e fantasia;
+
+- Destaca-se no gráfico acima as seguintes relações:
+
+  - Ficção histórica: família, pai e tempo;
+
+  - Fantasia: retorno, descoberta, lar, ajuda, mata, vida, mágica e mundo;
+
+  - Literatura infantil: começo, decisão, família, encontro, ajuda, vida, mãe, escola e tempo.
+
+------
+
+
+# Reflexão
+
+Ainda que alguns gêneros estejam com pouca representação na base como um todo e as palavras tenham sido buscadas a partir dos resumos, as relações observadas já demonstram que, com uma base maior e todo o texto de cada livro, é possível desenvolver modelos a partir:
+
+- de palavras e gêneros, para classificação automática de livros;
+
+- de avaliações, temas e gêneros, para identificar com mais clareza o que conquista mais público (e buscar escrever sobre isso).
+
+Enfim, gosto de escrever (já fiz dois livros de ficção e estou no terceiro:). O que posso dizer com certeza a partir deste estudo é que o ser humano prefere sim histórias fantasiosas, que lhe tirem da realidade e te tragam esperanças... ou ao menos um bom suspense e mistério. Acontece que, mesmo com esse desejo, inevitavelmente chegamos sempre aos mesmos temas, que são verdadeiramente os que mais nos importam e intrigam: família e vida.
